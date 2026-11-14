@@ -130,16 +130,25 @@ async function setupWhisper() {
   const modelTarget = path.join(MODELS_DIR, 'ggml-small.en-q5_1.bin');
 
   if (FORCE || !fs.existsSync(whisperTarget)) {
-    console.log('[whisper.cpp] Checking latest Windows x64 Vulkan release...');
-    const release = await fetchJson('https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest');
-    const assets = release.assets ?? [];
-    const asset =
-      assets.find((a) => /vulkan.*x64.*\.zip$/i.test(a.name) || /x64.*vulkan.*\.zip$/i.test(a.name)) ||
-      assets.find((a) => /whisper-bin-x64\.zip$/i.test(a.name)) ||
-      assets.find((a) => /win.*x64.*\.zip$/i.test(a.name));
+    console.log('[whisper.cpp] Checking recent Windows x64 releases...');
+    const releases = await fetchJson('https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=10');
+    let release = null;
+    let asset = null;
+    for (const rel of Array.isArray(releases) ? releases : []) {
+      const assets = rel.assets ?? [];
+      const found =
+        assets.find((a) => /vulkan.*x64.*\.zip$/i.test(a.name) || /x64.*vulkan.*\.zip$/i.test(a.name)) ||
+        assets.find((a) => /whisper-bin-x64\.zip$/i.test(a.name)) ||
+        assets.find((a) => /win.*x64.*\.zip$/i.test(a.name));
+      if (found) {
+        release = rel;
+        asset = found;
+        break;
+      }
+    }
 
-    if (!asset) {
-      throw new Error(`No Windows x64 zip asset found in whisper.cpp release ${release.tag_name}`);
+    if (!asset || !release) {
+      throw new Error('No Windows x64 zip asset found in recent whisper.cpp releases');
     }
 
     console.log(`[whisper.cpp] Found ${release.tag_name} (${asset.name})`);

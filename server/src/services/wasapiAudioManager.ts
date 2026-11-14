@@ -52,6 +52,7 @@ export class WasapiAudioManager extends EventEmitter {
   private trackDevices = { t1: '', t2: '', t3: '' };
   private lastHotSwapAt: string | null = null;
   private lastError: string | undefined;
+  private cachedDevices: AudioDeviceInfo[] = [];
 
   listDevices(): Promise<AudioDeviceInfo[]> {
     return new Promise((resolve, reject) => {
@@ -70,6 +71,7 @@ export class WasapiAudioManager extends EventEmitter {
           }
           try {
             const parsed = JSON.parse(stdout.trim()) as AudioDeviceInfo[];
+            this.cachedDevices = parsed;
             resolve(parsed);
           } catch (parseErr) {
             reject(parseErr);
@@ -98,9 +100,13 @@ export class WasapiAudioManager extends EventEmitter {
 
     const settings = getSettings();
     const args: string[] = [];
-    if (settings.audioT1Device) args.push('--t1-device', settings.audioT1Device);
-    if (settings.audioT2Device) args.push('--t2-device', settings.audioT2Device);
-    if (settings.audioT3Device) args.push('--t3-device', settings.audioT3Device);
+    if (settings.audioT1Device) {
+      args.push('--game-device', settings.audioT1Device);
+      const match = this.cachedDevices.find((d) => d.id === settings.audioT1Device);
+      if (match?.flow === 'capture') args.push('--t1-capture');
+    }
+    if (settings.audioT2Device) args.push('--comms-device', settings.audioT2Device);
+    if (settings.audioT3Device) args.push('--mic-device', settings.audioT3Device);
 
     this.lastError = undefined;
     this.stdoutBuffer = '';

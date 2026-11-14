@@ -840,10 +840,10 @@ namespace ComboCut.WasapiCapture
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--list-devices") listMode = true;
-                else if (args[i] == "--t1-device" && i + 1 < args.Length) t1Device = args[++i];
+                else if ((args[i] == "--t1-device" || args[i] == "--game-device") && i + 1 < args.Length) t1Device = args[++i];
                 else if (args[i] == "--t1-capture") t1Flow = "capture";
-                else if (args[i] == "--t2-device" && i + 1 < args.Length) t2Device = args[++i];
-                else if (args[i] == "--t3-device" && i + 1 < args.Length) t3Device = args[++i];
+                else if ((args[i] == "--t2-device" || args[i] == "--comms-device") && i + 1 < args.Length) t2Device = args[++i];
+                else if ((args[i] == "--t3-device" || args[i] == "--mic-device") && i + 1 < args.Length) t3Device = args[++i];
             }
 
             if (listMode)

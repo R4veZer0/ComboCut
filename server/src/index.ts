@@ -7,13 +7,18 @@ import { WebSocketServer, WebSocket } from 'ws';
 import {
   CLIENT_DIST_DIR,
   ensureRuntimeDirs,
-  EXPORTS_DIR,
-  PINNED_DIR,
   resolveBufferDir,
+  resolveExportsDir,
+  resolvePinnedDir,
+  setCustomDvrDir,
+  setCustomPinnedDir,
 } from './config/paths.js';
-import { getDb, getSettings, listTimelineMarkers } from './db/database.js';
+import { getDb, getSettings, listTimelineMarkers, updateSettings } from './db/database.js';
+import { getLocalLanIp } from './utils/process.js';
 import { detectGpuEncoder, getCachedGpuEncoder } from './services/gpuDetector.js';
 import { MediaMtxManager } from './services/mediaMtxManager.js';
+import { ProgramRelayManager } from './services/programRelayManager.js';
+import { DvrRetentionService } from './services/dvrRetentionService.js';
 import { HlsDvrManager } from './services/hlsDvrManager.js';
 import { RestreamManager } from './services/restreamManager.js';
 import { WasapiAudioManager } from './services/wasapiAudioManager.js';
@@ -24,19 +29,26 @@ import { PinnedClipManager } from './services/pinnedClipManager.js';
 import { ChatMonitor } from './services/chatMonitor.js';
 import { AiHighlightFunnel } from './services/aiHighlightFunnel.js';
 import { ClipExportManager } from './services/clipExportManager.js';
+import { BatchExportQueue } from './services/batchExportQueue.js';
+import { getWhisperDownloadState, listWhisperModels, subtitleEvents } from './services/subtitleService.js';
 import { createApiRouter } from './routes/api.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '3001', 10);
 
 async function bootstrap() {
   getDb();
-  const settings = getSettings();
+  // Always boot into On-Air Live Standby (no stale Off-Air restore on startup)
+  const settings = updateSettings({ appMode: 'onair' });
+  setCustomDvrDir(settings.dvrStorageDir);
+  setCustomPinnedDir(settings.pinnedClipsDir);
   const initialBufferDir = resolveBufferDir(settings.ramDiskEnabled ? settings.ramDiskPath : null);
   ensureRuntimeDirs(initialBufferDir);
 
   await detectGpuEncoder();
 
   const mediaMtx = new MediaMtxManager();
+  const programRelay = new ProgramRelayManager(mediaMtx);
+  const dvrRetention = new DvrRetentionService();
   const hlsDvr = new HlsDvrManager();
   const restream = new RestreamManager();
   const wasapiAudio = new WasapiAudioManager();
@@ -47,6 +59,7 @@ async function bootstrap() {
   const chatMonitor = new ChatMonitor();
   const aiFunnel = new AiHighlightFunnel(chatMonitor, wasapiAudio, pinnedClips);
   const clipExport = new ClipExportManager();
+  const batchExport = new BatchExportQueue(clipExport);
 
   const app = express();
   app.use(cors());
@@ -65,13 +78,19 @@ async function bootstrap() {
     })(req, res, next);
   });
 
-  app.use('/pinned', express.static(PINNED_DIR));
-  app.use('/exports', express.static(EXPORTS_DIR));
+  app.use('/pinned', (req, res, next) => {
+    express.static(resolvePinnedDir())(req, res, next);
+  });
+  app.use('/exports', (req, res, next) => {
+    express.static(resolveExportsDir())(req, res, next);
+  });
 
   app.use(
     '/api',
     createApiRouter({
       mediaMtx,
+      programRelay,
+      dvrRetention,
       hlsDvr,
       restream,
       wasapiAudio,
@@ -82,6 +101,7 @@ async function bootstrap() {
       chatMonitor,
       aiFunnel,
       clipExport,
+      batchExport,
     }),
   );
 
@@ -111,7 +131,10 @@ async function bootstrap() {
     return {
       gpu: getCachedGpuEncoder(),
       settings: getSettings(),
+      lanIp: getLocalLanIp(),
       ingest: mediaMtx.getStatus(),
+      relay: programRelay.getStatus(),
+      dvrRetention: dvrRetention.getStats(),
       hls: hlsDvr.getStatus(),
       restreamWorkers: restream.getWorkerStatuses(),
       audio: wasapiAudio.getStatus(),
@@ -125,6 +148,9 @@ async function bootstrap() {
       ai: aiFunnel.getStatus(),
       aiQueue: aiFunnel.listQueue(),
       demo: clipExport.getDemoStatus(),
+      whisperModels: listWhisperModels(),
+      whisperDownload: getWhisperDownloadState(),
+      batchExportQueue: batchExport.listJobs(),
     };
   }
 
@@ -151,6 +177,7 @@ async function bootstrap() {
   });
 
   mediaMtx.on('status', broadcastState);
+  programRelay.on('status', broadcastState);
   hlsDvr.on('status', broadcastState);
   restream.on('status', broadcastState);
   wasapiAudio.on('status', broadcastState);
@@ -166,6 +193,8 @@ async function bootstrap() {
   aiFunnel.on('queueUpdated', broadcastState);
   aiFunnel.on('markerCreated', broadcastState);
   clipExport.on('demoStatus', broadcastState);
+  batchExport.on('updated', broadcastState);
+  subtitleEvents.on('download', broadcastState);
 
   let isProgramOnline = false;
   obsWs.on('connected', () => {
@@ -180,20 +209,33 @@ async function bootstrap() {
   mediaMtx.on('programOnline', () => {
     isProgramOnline = true;
     chatMonitor.setOnAir(true);
-    console.log('[Broadcast] live/program is ONLINE -> releasing Off-Air & starting HLS DVR ring buffer');
-    void offAir.releaseForOnAir('RTMP live/program became active').then(() => {
-      hlsDvr.start();
+    console.log('[Broadcast] live/program is ONLINE -> releasing Off-Air & switching relay to live OBS');
+    void offAir.releaseForOnAir('RTMP live/program became active').then(async () => {
+      if (getSettings().appMode === 'onair') {
+        await wasapiAudio.stop();
+        programRelay.start();
+        hlsDvr.start();
+      }
     });
   });
 
   mediaMtx.on('programOffline', () => {
     isProgramOnline = false;
     chatMonitor.setOnAir(obsWs.getStatus().connected);
-    console.log('[Broadcast] live/program is OFFLINE -> stopping HLS DVR ring buffer');
-    void hlsDvr.stop();
+    console.log('[Broadcast] live/program is OFFLINE -> failing over relay to standby bars & keeping HLS DVR alive');
   });
 
   mediaMtx.start();
+  dvrRetention.start();
+  aiFunnel.setActiveSourceCheck(() => isProgramOnline || offAir.getStatus().running);
+  await wasapiAudio.stop();
+  programRelay.start();
+  setTimeout(() => {
+    if (getSettings().appMode === 'onair') {
+      hlsDvr.start();
+    }
+  }, 1500);
+  void obsWs.connect();
   aiFunnel.startMonitoring();
   if (settings.replayWatchDir) {
     vodWatcher.startWatcher(settings.replayWatchDir);
@@ -205,6 +247,7 @@ async function bootstrap() {
 
   async function shutdown() {
     console.log('\n[Server] Shutting down...');
+    dvrRetention.stop();
     aiFunnel.stopMonitoring();
     chatMonitor.stop();
     vodWatcher.stopWatcher();
@@ -214,6 +257,7 @@ async function bootstrap() {
     await offAir.stop();
     await wasapiAudio.stop();
     await hlsDvr.stop();
+    await programRelay.stop();
     await mediaMtx.stop();
     server.close(() => process.exit(0));
   }

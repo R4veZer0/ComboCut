@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, globalShortcut, dialog, ipcMain, shell, Tray, Menu, nativeImage, net } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,6 +11,7 @@ const APP_URL = 'http://127.0.0.1:3001';
 
 let backendProc = null;
 let mainWindow = null;
+let tray = null;
 let isQuitting = false;
 let lastUpdateStatus = { state: 'idle', message: '' };
 let startupLogPath = '';
@@ -45,9 +46,34 @@ function sendUpdateStatus(status) {
   }
 }
 
+function isSilentUpdaterError(err) {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const statusCode = err && typeof err === 'object' ? err.statusCode : undefined;
+  const code = err && typeof err === 'object' ? String(err.code || '') : '';
+  return (
+    statusCode === 404 ||
+    /\b404\b|cannot find latest\.yml|no published versions/i.test(msg) ||
+    /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|net::ERR_/i.test(
+      `${code} ${msg}`
+    )
+  );
+}
+
+function handleUpdateError(err) {
+  if (isSilentUpdaterError(err)) {
+    sendUpdateStatus({ state: 'up-to-date', message: `Up to date — v${app.getVersion()}` });
+    return;
+  }
+  sendUpdateStatus({
+    state: 'error',
+    message: err instanceof Error ? err.message : String(err || 'Update check failed'),
+  });
+}
+
 function setupAutoUpdater() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = true;
 
   autoUpdater.on('checking-for-update', () => {
     sendUpdateStatus({ state: 'checking', message: 'Checking GitHub Releases for updates...' });
@@ -83,10 +109,7 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('error', (err) => {
-    sendUpdateStatus({
-      state: 'error',
-      message: err ? err.message : 'Update check failed',
-    });
+    handleUpdateError(err);
   });
 
   ipcMain.handle('updater:check', async () => {
@@ -98,7 +121,7 @@ function setupAutoUpdater() {
     try {
       await autoUpdater.checkForUpdatesAndNotify();
     } catch (err) {
-      sendUpdateStatus({ state: 'error', message: err instanceof Error ? err.message : String(err) });
+      handleUpdateError(err);
     }
     return lastUpdateStatus;
   });
@@ -108,6 +131,62 @@ function setupAutoUpdater() {
     globalShortcut.unregisterAll();
     killBackendTree();
     autoUpdater.quitAndInstall(false, true);
+  });
+
+  ipcMain.handle('dialog:selectDirectory', async (_event, defaultPath) => {
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      title: 'Select DVR Buffer & Exports Folder',
+      defaultPath: typeof defaultPath === 'string' && defaultPath.length > 0 ? defaultPath : undefined,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('shell:openFolder', async (_event, targetPath) => {
+    if (typeof targetPath !== 'string' || targetPath.trim().length === 0) return '';
+    return shell.openPath(targetPath);
+  });
+
+  ipcMain.handle('submit-feedback', async (_event, payload) => {
+    const formResponseUrl =
+      'https://docs.google.com/forms/d/e/1FAIpQLScvFtxFP5VNPmXfpCD2TVraARn2lu01ZGckajkMXcRupW2edw/formResponse';
+    const fallbackUrl = 'https://forms.gle/AgcZhtAgxkM3UJxG7';
+
+    const params = new URLSearchParams();
+    params.set('entry.1002976204', String(payload?.category || 'Bug Report / Crash'));
+    params.set('entry.55595861', String(payload?.details || ''));
+    params.set('entry.94588325', String(payload?.handle || 'Anonymous'));
+    params.set('entry.210789531', String(payload?.diagnostics || ''));
+
+    try {
+      const response = await net.fetch(formResponseUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        },
+        body: params.toString(),
+      });
+      if (response.status === 200) {
+        return { ok: true, status: response.status };
+      }
+      await shell.openExternal(fallbackUrl);
+      return {
+        ok: false,
+        status: response.status,
+        fallbackOpened: true,
+        error: `Google Forms returned HTTP ${response.status}. Opened form in browser.`,
+      };
+    } catch (err) {
+      await shell.openExternal(fallbackUrl);
+      return {
+        ok: false,
+        fallbackOpened: true,
+        error: err instanceof Error ? err.message : 'Network error reaching Google Forms',
+      };
+    }
   });
 
   if (app.isPackaged) {
@@ -279,6 +358,72 @@ function killBackendTree() {
   }
 }
 
+function createTrayIcon() {
+  const size = 16;
+  const buf = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const idx = (y * size + x) * 4;
+      const border = x === 0 || y === 0 || x === size - 1 || y === size - 1;
+      const dot = x >= 5 && x <= 10 && y >= 5 && y <= 10;
+      if (border) {
+        buf[idx] = 99;
+        buf[idx + 1] = 102;
+        buf[idx + 2] = 241;
+        buf[idx + 3] = 255;
+      } else if (dot) {
+        buf[idx] = 244;
+        buf[idx + 1] = 63;
+        buf[idx + 2] = 94;
+        buf[idx + 3] = 255;
+      } else {
+        buf[idx] = 24;
+        buf[idx + 1] = 24;
+        buf[idx + 2] = 27;
+        buf[idx + 3] = 255;
+      }
+    }
+  }
+  return nativeImage.createFromBuffer(buf, { width: size, height: size });
+}
+
+function showMainWindow() {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip('ComboCut Control Room (v0.2.0)');
+  const menu = Menu.buildFromTemplate([
+    { label: 'Show ComboCut', click: () => showMainWindow() },
+    {
+      label: 'Minimize to Tray',
+      click: () => {
+        if (mainWindow) mainWindow.hide();
+      },
+    },
+    { type: 'separator' },
+    { label: 'Mark Highlight (F9)', click: () => triggerGlobalPin() },
+    { type: 'separator' },
+    {
+      label: 'Quit ComboCut',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+  tray.setContextMenu(menu);
+  tray.on('double-click', () => showMainWindow());
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -286,7 +431,7 @@ function createWindow() {
     minWidth: 1180,
     minHeight: 740,
     backgroundColor: '#09090b',
-    title: 'ComboCut Control Room (v0.1.0)',
+    title: 'ComboCut Control Room (v0.2.0)',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -326,12 +471,17 @@ app.whenReady().then(async () => {
   }
 
   setupAutoUpdater();
+  createTray();
   createWindow();
 });
 
 app.on('before-quit', () => {
   if (isQuitting) return;
   isQuitting = true;
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
   globalShortcut.unregisterAll();
   killBackendTree();
 });

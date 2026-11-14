@@ -1,5 +1,5 @@
 import os from 'node:os';
-import type { ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 
 /**
  * Sets a spawned child process to BELOW_NORMAL priority on Windows
@@ -60,4 +60,44 @@ export function gracefulStopFfmpeg(child: ChildProcess, timeoutMs = 4000): Promi
       done();
     }, timeoutMs);
   });
+}
+
+/**
+ * Forcefully terminates a process tree on Windows using taskkill /F /T /PID.
+ */
+export function forceKillProcessTree(pid: number | null | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (!pid || pid <= 0) {
+      resolve();
+      return;
+    }
+    if (process.platform === 'win32') {
+      execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, timeout: 4000 }, () => {
+        resolve();
+      });
+    } else {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+      resolve();
+    }
+  });
+}
+
+/**
+ * Returns the first non-internal IPv4 LAN address for Dual-PC RTMP setup.
+ */
+export function getLocalLanIp(): string {
+  const nets = os.networkInterfaces();
+  for (const entries of Object.values(nets)) {
+    if (!entries) continue;
+    for (const net of entries) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return '127.0.0.1';
 }

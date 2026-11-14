@@ -62,6 +62,8 @@ export class MediaMtxManager extends EventEmitter {
       'paths:',
       '  live/program:',
       '    source: publisher',
+      '  live/program_out:',
+      '    source: publisher',
       '  live/cam:',
       '    source: publisher',
       '  live/clean:',

@@ -9,12 +9,44 @@ export type VideoEncoder = 'h264_nvenc' | 'h264_amf' | 'h264_qsv' | 'libx264';
 
 export interface GpuDetectionResult {
   selected: VideoEncoder;
+  adapterName: string;
   probed: Array<{
     encoder: VideoEncoder;
     available: boolean;
     reason?: string;
   }>;
   detectedAt: string;
+}
+
+async function detectGpuAdapterName(): Promise<string> {
+  if (process.platform !== 'win32') return 'CPU / Unknown GPU';
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        "(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch 'Microsoft Basic' } | Select-Object -ExpandProperty Name) -join ', '",
+      ],
+      { windowsHide: true, timeout: 4000 },
+    );
+    const cleaned = stdout.trim();
+    if (cleaned.length > 0) return cleaned;
+  } catch {
+    // Fall back to nvidia-smi if WMI/CIM unavailable
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      'nvidia-smi',
+      ['--query-gpu=name', '--format=csv,noheader'],
+      { windowsHide: true, timeout: 3000 },
+    );
+    const cleaned = stdout.trim();
+    if (cleaned.length > 0) return cleaned;
+  } catch {
+    // ignore
+  }
+  return 'Windows Display Adapter';
 }
 
 const CANDIDATE_ENCODERS: VideoEncoder[] = [
@@ -54,9 +86,12 @@ export async function detectGpuEncoder(force = false): Promise<GpuDetectionResul
     return cachedResult;
   }
 
+  const adapterName = await detectGpuAdapterName();
+
   if (!fs.existsSync(BINS.ffmpeg)) {
     const fallback: GpuDetectionResult = {
       selected: 'libx264',
+      adapterName,
       probed: CANDIDATE_ENCODERS.map((encoder) => ({
         encoder,
         available: encoder === 'libx264',
@@ -87,11 +122,12 @@ export async function detectGpuEncoder(force = false): Promise<GpuDetectionResul
 
   cachedResult = {
     selected,
+    adapterName,
     probed,
     detectedAt: new Date().toISOString(),
   };
 
-  console.log(`[GPU] Auto-detected encoder: ${selected}`);
+  console.log(`[GPU] Auto-detected encoder: ${selected} (${adapterName})`);
   return cachedResult;
 }
 

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { BINS, ensureRuntimeDirs, resolveBufferDir } from '../config/paths.js';
+import { BINS, ensureRuntimeDirs, getDriveFreeBytes, resolveBufferDir } from '../config/paths.js';
 import { getSettings } from '../db/database.js';
 import { gracefulStopFfmpeg, setBelowNormalPriority } from '../utils/process.js';
 
@@ -14,6 +14,7 @@ export interface HlsDvrStatus {
   bufferMinutes: number;
   segmentCount: number;
   totalBytes: number;
+  freeBytes: number | null;
   playlistUrl: string;
   error?: string;
 }
@@ -64,13 +65,13 @@ export class HlsDvrManager extends EventEmitter {
       '-hide_banner',
       '-loglevel', 'warning',
       '-fflags', '+genpts',
-      '-i', 'rtmp://127.0.0.1:1935/live/program',
+      '-i', 'rtmp://127.0.0.1:1935/live/program_out',
       '-c', 'copy',
       '-f', 'hls',
       '-hls_time', '2',
       '-hls_list_size', String(hlsListSize),
       '-hls_delete_threshold', '4',
-      '-hls_flags', 'delete_segments+independent_segments+temp_file',
+      '-hls_flags', 'append_list+delete_segments+omit_endlist+independent_segments+temp_file',
       '-hls_segment_filename', segmentPattern,
       playlistPath,
     ];
@@ -163,6 +164,7 @@ export class HlsDvrManager extends EventEmitter {
       bufferMinutes,
       segmentCount,
       totalBytes,
+      freeBytes: getDriveFreeBytes(bufferDir),
       playlistUrl: '/buffer/live.m3u8',
       error: this.lastError,
     };

@@ -19,6 +19,9 @@ export type VodSourceType = 'drop' | 'replay';
 export type VodScanStatus = 'queued' | 'scanning' | 'ready' | 'error';
 export type MarkerSource = 'obs' | 'hotkey' | 'ai';
 export type AiHighlightStatus = 'pending' | 'approved' | 'auto_exported' | 'dismissed';
+export type AiDetectionMode = 'audio_visual' | 'audio_only' | 'visual_only' | 'off';
+export type AiVisualFocus = 'balanced' | 'clutch_heavy' | 'funny_reactions';
+export type AiSensitivity = 'high_recall' | 'balanced' | 'strict';
 
 export interface NormalizedRect {
   x: number;
@@ -37,12 +40,38 @@ export interface TimelineMarker {
   createdAt: string;
 }
 
+export type LayoutMode =
+  | 'split_2box'
+  | 'top_cam_bottom_game'
+  | 'pip_rounded'
+  | 'blurred_pillarbox'
+  | 'fullscreen_gameplay'
+  | 'fullscreen_cam';
+
+export type WhisperModelId = 'base.en' | 'small' | 'large-v3-turbo';
+
 export interface ObsScenePreset {
   sceneName: string;
   webcamSource: string;
   webcamRect: NormalizedRect | null;
-  layoutMode: 'split_2box' | 'fullscreen_gameplay' | 'fullscreen_cam';
+  layoutMode: LayoutMode;
   updatedAt: string;
+}
+
+export type ClipStatus = 'pending' | 'approved' | 'dismissed';
+
+export interface SubtitleWord {
+  text: string;
+  startSec: number;
+  endSec: number;
+}
+
+export interface SubtitleCue {
+  id: number;
+  startSec: number;
+  endSec: number;
+  text: string;
+  words?: SubtitleWord[];
 }
 
 export interface PinnedClip {
@@ -53,6 +82,9 @@ export interface PinnedClip {
   triggerLabel: string;
   durationSec: number;
   cropPreset: ObsScenePreset | null;
+  status: ClipStatus;
+  subtitles: SubtitleCue[];
+  srtPath: string;
   createdAt: string;
 }
 
@@ -63,7 +95,32 @@ export interface AiSignalBreakdown {
   transcript: number;
   whisperAvailable: boolean;
   reasons: string[];
+  headline?: string;
+  tags?: string[];
+  summary?: string;
 }
+
+export type FacecamShape = 'rectangle' | 'rounded' | 'circle';
+
+export interface OffAirFacecamConfig {
+  x: number;
+  y: number;
+  widthPct: number;
+  zoom: number;
+  mirror: boolean;
+  shape: FacecamShape;
+  border: boolean;
+}
+
+export const DEFAULT_OFF_AIR_FACECAM: OffAirFacecamConfig = {
+  x: 0.73,
+  y: 0.68,
+  widthPct: 25,
+  zoom: 1.0,
+  mirror: false,
+  shape: 'rounded',
+  border: true,
+};
 
 export interface AiWeights {
   chat: number;
@@ -77,6 +134,8 @@ export interface AiHighlightItem {
   status: AiHighlightStatus;
   score: number;
   pinnedClipId: number | null;
+  clipFilename?: string;
+  clipDurationSec?: number;
   transcript: string;
   signals: AiSignalBreakdown;
   exportPath?: string;
@@ -99,8 +158,12 @@ export interface VodItem {
 
 export interface AppSettings {
   bufferMinutes: number;
+  maxBufferGb: number;
   ramDiskEnabled: boolean;
   ramDiskPath: string;
+  dvrStorageDir: string;
+  pinnedClipsDir: string;
+  appMode: 'onair' | 'offair';
   offAirMode: OffAirMode;
   dshowVideoDevice: string;
   dshowAudioDevice: string;
@@ -111,6 +174,13 @@ export interface AppSettings {
   audioT1Device: string;
   audioT2Device: string;
   audioT3Device: string;
+  whisperModel: WhisperModelId;
+  aiDetectionMode: AiDetectionMode;
+  aiVisualFocus: AiVisualFocus;
+  aiSensitivity: AiSensitivity;
+  aiMaxClipSec: number;
+  brandWatermark: string;
+  offAirFacecam: OffAirFacecamConfig;
 }
 
 let db: DatabaseSync | null = null;
@@ -180,6 +250,9 @@ function initSchema(database: DatabaseSync): void {
       trigger_label TEXT NOT NULL DEFAULT '',
       duration_sec REAL NOT NULL DEFAULT 0,
       crop_preset_json TEXT NOT NULL DEFAULT 'null',
+      status TEXT NOT NULL DEFAULT 'approved' CHECK(status IN ('pending', 'approved', 'dismissed')),
+      subtitles_json TEXT NOT NULL DEFAULT '[]',
+      srt_path TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -201,6 +274,20 @@ function initSchema(database: DatabaseSync): void {
     );
   `);
 
+  const clipCols = database
+    .prepare('PRAGMA table_info(pinned_clips)')
+    .all() as unknown as Array<{ name: string }>;
+  const colNames = new Set(clipCols.map((c) => c.name));
+  if (!colNames.has('status')) {
+    database.exec("ALTER TABLE pinned_clips ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'");
+  }
+  if (!colNames.has('subtitles_json')) {
+    database.exec("ALTER TABLE pinned_clips ADD COLUMN subtitles_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!colNames.has('srt_path')) {
+    database.exec("ALTER TABLE pinned_clips ADD COLUMN srt_path TEXT NOT NULL DEFAULT ''");
+  }
+
   const defaultWeights: Array<[string, number]> = [
     ['chat', 1.0],
     ['audio', 1.0],
@@ -213,9 +300,13 @@ function initSchema(database: DatabaseSync): void {
   }
 
   const defaults: Record<string, string> = {
-    bufferMinutes: '20',
+    bufferMinutes: '30',
+    maxBufferGb: '25',
     ramDiskEnabled: 'false',
     ramDiskPath: '',
+    dvrStorageDir: '',
+    pinnedClipsDir: '',
+    appMode: 'onair',
     offAirMode: 'ddagrab',
     dshowVideoDevice: '',
     dshowAudioDevice: '',
@@ -226,6 +317,13 @@ function initSchema(database: DatabaseSync): void {
     audioT1Device: '',
     audioT2Device: '',
     audioT3Device: '',
+    whisperModel: 'base.en',
+    aiDetectionMode: 'audio_visual',
+    aiVisualFocus: 'balanced',
+    aiSensitivity: 'balanced',
+    aiMaxClipSec: '180',
+    brandWatermark: '@ComboCut',
+    offAirFacecam: JSON.stringify(DEFAULT_OFF_AIR_FACECAM),
   };
 
   const insert = database.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
@@ -237,12 +335,40 @@ function initSchema(database: DatabaseSync): void {
 export function getSettings(): AppSettings {
   const rows = getDb().prepare('SELECT key, value FROM settings').all() as unknown as Array<{ key: string; value: string }>;
   const map = new Map(rows.map((r) => [r.key, r.value]));
-  const parsedMinutes = Number.parseInt(map.get('bufferMinutes') ?? '20', 10);
+  const parsedMinutes = Number.parseInt(map.get('bufferMinutes') ?? '30', 10);
+  const parsedMaxGb = Number.parseInt(map.get('maxBufferGb') ?? '25', 10);
   const rawMode = map.get('offAirMode');
+  const rawAppMode = map.get('appMode');
+  const rawWhisperModel = map.get('whisperModel');
+  const whisperModel: WhisperModelId =
+    rawWhisperModel === 'small' || rawWhisperModel === 'large-v3-turbo' ? rawWhisperModel : 'base.en';
+  const rawAiMode = map.get('aiDetectionMode');
+  const aiDetectionMode: AiDetectionMode =
+    rawAiMode === 'audio_only' || rawAiMode === 'visual_only' || rawAiMode === 'off'
+      ? rawAiMode
+      : 'audio_visual';
+  const rawVisualFocus = map.get('aiVisualFocus');
+  const aiVisualFocus: AiVisualFocus =
+    rawVisualFocus === 'clutch_heavy' || rawVisualFocus === 'funny_reactions'
+      ? rawVisualFocus
+      : 'balanced';
+  const rawSensitivity = map.get('aiSensitivity');
+  const aiSensitivity: AiSensitivity =
+    rawSensitivity === 'high_recall' || rawSensitivity === 'strict'
+      ? rawSensitivity
+      : 'balanced';
+  const parsedMaxClipSec = Number.parseInt(map.get('aiMaxClipSec') ?? '180', 10);
+  const aiMaxClipSec = Number.isFinite(parsedMaxClipSec)
+    ? Math.min(180, Math.max(30, parsedMaxClipSec))
+    : 180;
   return {
-    bufferMinutes: Number.isFinite(parsedMinutes) ? Math.min(30, Math.max(1, parsedMinutes)) : 20,
+    bufferMinutes: Number.isFinite(parsedMinutes) ? Math.min(240, Math.max(1, parsedMinutes)) : 30,
+    maxBufferGb: Number.isFinite(parsedMaxGb) ? Math.min(500, Math.max(2, parsedMaxGb)) : 25,
     ramDiskEnabled: map.get('ramDiskEnabled') === 'true',
     ramDiskPath: map.get('ramDiskPath') ?? '',
+    dvrStorageDir: map.get('dvrStorageDir') ?? '',
+    pinnedClipsDir: map.get('pinnedClipsDir') ?? '',
+    appMode: rawAppMode === 'offair' ? 'offair' : 'onair',
     offAirMode: rawMode === 'dshow' ? 'dshow' : 'ddagrab',
     dshowVideoDevice: map.get('dshowVideoDevice') ?? '',
     dshowAudioDevice: map.get('dshowAudioDevice') ?? '',
@@ -253,14 +379,50 @@ export function getSettings(): AppSettings {
     audioT1Device: map.get('audioT1Device') ?? '',
     audioT2Device: map.get('audioT2Device') ?? '',
     audioT3Device: map.get('audioT3Device') ?? '',
+    whisperModel,
+    aiDetectionMode,
+    aiVisualFocus,
+    aiSensitivity,
+    aiMaxClipSec,
+    brandWatermark: map.get('brandWatermark') ?? '@ComboCut',
+    offAirFacecam: sanitizeFacecamConfig(
+      safeParseJson(map.get('offAirFacecam') ?? '', DEFAULT_OFF_AIR_FACECAM),
+    ),
   };
+}
+
+function sanitizeFacecamConfig(raw: Partial<OffAirFacecamConfig> | null | undefined): OffAirFacecamConfig {
+  const shape: FacecamShape =
+    raw?.shape === 'rectangle' || raw?.shape === 'circle' ? raw.shape : 'rounded';
+  return {
+    x: clampNum(raw?.x, 0, 0.9, DEFAULT_OFF_AIR_FACECAM.x),
+    y: clampNum(raw?.y, 0, 0.9, DEFAULT_OFF_AIR_FACECAM.y),
+    widthPct: clampNum(raw?.widthPct, 15, 50, DEFAULT_OFF_AIR_FACECAM.widthPct),
+    zoom: clampNum(raw?.zoom, 1.0, 2.0, DEFAULT_OFF_AIR_FACECAM.zoom),
+    mirror: Boolean(raw?.mirror ?? DEFAULT_OFF_AIR_FACECAM.mirror),
+    shape,
+    border: raw?.border !== undefined ? Boolean(raw.border) : DEFAULT_OFF_AIR_FACECAM.border,
+  };
+}
+
+function clampNum(v: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n * 1000) / 1000));
 }
 
 export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   const upsert = getDb().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
   if (patch.bufferMinutes !== undefined) {
-    const clamped = Math.min(30, Math.max(1, Math.round(patch.bufferMinutes)));
+    const clamped = Math.min(240, Math.max(1, Math.round(patch.bufferMinutes)));
     upsert.run('bufferMinutes', String(clamped));
+  }
+  if (patch.maxBufferGb !== undefined) {
+    const clampedGb = Math.min(500, Math.max(2, Math.round(patch.maxBufferGb)));
+    upsert.run('maxBufferGb', String(clampedGb));
+  }
+  if (patch.appMode !== undefined) {
+    upsert.run('appMode', patch.appMode === 'offair' ? 'offair' : 'onair');
   }
   if (patch.ramDiskEnabled !== undefined) {
     upsert.run('ramDiskEnabled', patch.ramDiskEnabled ? 'true' : 'false');
@@ -268,8 +430,49 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   if (patch.offAirMode !== undefined) {
     upsert.run('offAirMode', patch.offAirMode === 'dshow' ? 'dshow' : 'ddagrab');
   }
+  if (patch.whisperModel !== undefined) {
+    const valid =
+      patch.whisperModel === 'small' || patch.whisperModel === 'large-v3-turbo'
+        ? patch.whisperModel
+        : 'base.en';
+    upsert.run('whisperModel', valid);
+  }
+  if (patch.aiDetectionMode !== undefined) {
+    const valid =
+      patch.aiDetectionMode === 'audio_only' ||
+      patch.aiDetectionMode === 'visual_only' ||
+      patch.aiDetectionMode === 'off'
+        ? patch.aiDetectionMode
+        : 'audio_visual';
+    upsert.run('aiDetectionMode', valid);
+  }
+  if (patch.aiVisualFocus !== undefined) {
+    const valid =
+      patch.aiVisualFocus === 'clutch_heavy' || patch.aiVisualFocus === 'funny_reactions'
+        ? patch.aiVisualFocus
+        : 'balanced';
+    upsert.run('aiVisualFocus', valid);
+  }
+  if (patch.aiSensitivity !== undefined) {
+    const valid =
+      patch.aiSensitivity === 'high_recall' || patch.aiSensitivity === 'strict'
+        ? patch.aiSensitivity
+        : 'balanced';
+    upsert.run('aiSensitivity', valid);
+  }
+  if (patch.aiMaxClipSec !== undefined) {
+    const clamped = Math.min(180, Math.max(30, Math.round(patch.aiMaxClipSec)));
+    upsert.run('aiMaxClipSec', String(clamped));
+  }
+  if (patch.offAirFacecam !== undefined) {
+    const current = getSettings().offAirFacecam;
+    const merged = sanitizeFacecamConfig({ ...current, ...patch.offAirFacecam });
+    upsert.run('offAirFacecam', JSON.stringify(merged));
+  }
   const stringKeys = [
     'ramDiskPath',
+    'dvrStorageDir',
+    'pinnedClipsDir',
     'dshowVideoDevice',
     'dshowAudioDevice',
     'webcamDevice',
@@ -279,6 +482,7 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     'audioT1Device',
     'audioT2Device',
     'audioT3Device',
+    'brandWatermark',
   ] as const;
   for (const key of stringKeys) {
     if (patch[key] !== undefined) {
@@ -592,11 +796,12 @@ export function createPinnedClip(input: {
   triggerLabel: string;
   durationSec: number;
   cropPreset: ObsScenePreset | null;
+  status?: ClipStatus;
 }): PinnedClip {
   const info = getDb()
     .prepare(
-      `INSERT INTO pinned_clips (file_path, filename, trigger_source, trigger_label, duration_sec, crop_preset_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO pinned_clips (file_path, filename, trigger_source, trigger_label, duration_sec, crop_preset_json, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.filePath,
@@ -605,24 +810,26 @@ export function createPinnedClip(input: {
       input.triggerLabel,
       input.durationSec,
       JSON.stringify(input.cropPreset),
+      input.status ?? 'approved',
     );
   return getPinnedClip(Number(info.lastInsertRowid))!;
 }
 
-export function getPinnedClip(id: number): PinnedClip | null {
-  const r = getDb().prepare('SELECT * FROM pinned_clips WHERE id = ?').get(id) as unknown as
-    | {
-        id: number;
-        file_path: string;
-        filename: string;
-        trigger_source: MarkerSource;
-        trigger_label: string;
-        duration_sec: number;
-        crop_preset_json: string;
-        created_at: string;
-      }
-    | undefined;
-  if (!r) return null;
+interface RawPinnedClipRow {
+  id: number;
+  file_path: string;
+  filename: string;
+  trigger_source: MarkerSource;
+  trigger_label: string;
+  duration_sec: number;
+  crop_preset_json: string;
+  status?: ClipStatus;
+  subtitles_json?: string;
+  srt_path?: string;
+  created_at: string;
+}
+
+function mapPinnedClipRow(r: RawPinnedClipRow): PinnedClip {
   return {
     id: r.id,
     filePath: r.file_path,
@@ -631,31 +838,56 @@ export function getPinnedClip(id: number): PinnedClip | null {
     triggerLabel: r.trigger_label,
     durationSec: r.duration_sec,
     cropPreset: safeParseJson(r.crop_preset_json, null),
+    status: r.status === 'pending' || r.status === 'dismissed' ? r.status : 'approved',
+    subtitles: safeParseJson<SubtitleCue[]>(r.subtitles_json ?? '[]', []),
+    srtPath: r.srt_path ?? '',
     createdAt: r.created_at,
   };
 }
 
+export function getPinnedClip(id: number): PinnedClip | null {
+  const r = getDb().prepare('SELECT * FROM pinned_clips WHERE id = ?').get(id) as unknown as
+    | RawPinnedClipRow
+    | undefined;
+  if (!r) return null;
+  return mapPinnedClipRow(r);
+}
+
 export function listPinnedClips(): PinnedClip[] {
-  const rows = getDb().prepare('SELECT * FROM pinned_clips ORDER BY id DESC').all() as unknown as Array<{
-    id: number;
-    file_path: string;
-    filename: string;
-    trigger_source: MarkerSource;
-    trigger_label: string;
-    duration_sec: number;
-    crop_preset_json: string;
-    created_at: string;
-  }>;
-  return rows.map((r) => ({
-    id: r.id,
-    filePath: r.file_path,
-    filename: r.filename,
-    triggerSource: r.trigger_source,
-    triggerLabel: r.trigger_label,
-    durationSec: r.duration_sec,
-    cropPreset: safeParseJson(r.crop_preset_json, null),
-    createdAt: r.created_at,
-  }));
+  const rows = getDb()
+    .prepare("SELECT * FROM pinned_clips WHERE status = 'approved' ORDER BY id DESC")
+    .all() as unknown as RawPinnedClipRow[];
+  return rows.map(mapPinnedClipRow);
+}
+
+export function updatePinnedClipStatus(id: number, status: ClipStatus): PinnedClip | null {
+  getDb().prepare('UPDATE pinned_clips SET status = ? WHERE id = ?').run(status, id);
+  return getPinnedClip(id);
+}
+
+export function updatePinnedClipSubtitles(
+  id: number,
+  subtitles: SubtitleCue[],
+  srtPath: string,
+): PinnedClip | null {
+  getDb()
+    .prepare('UPDATE pinned_clips SET subtitles_json = ?, srt_path = ? WHERE id = ?')
+    .run(JSON.stringify(subtitles), srtPath, id);
+  return getPinnedClip(id);
+}
+
+export function updatePinnedClipPaths(id: number, filePath: string, srtPath: string): PinnedClip | null {
+  getDb()
+    .prepare('UPDATE pinned_clips SET file_path = ?, srt_path = ? WHERE id = ?')
+    .run(filePath, srtPath, id);
+  return getPinnedClip(id);
+}
+
+export function listAllNonDismissedClips(): PinnedClip[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM pinned_clips WHERE status != 'dismissed' ORDER BY id DESC")
+    .all() as unknown as RawPinnedClipRow[];
+  return rows.map(mapPinnedClipRow);
 }
 
 export function deletePinnedClip(id: number): boolean {
@@ -708,12 +940,21 @@ export function createAiHighlight(input: {
 }
 
 export function getAiHighlight(id: number): AiHighlightItem | null {
-  const r = getDb().prepare('SELECT * FROM ai_highlights WHERE id = ?').get(id) as unknown as
+  const r = getDb()
+    .prepare(
+      `SELECT ah.*, pc.filename AS clip_filename, pc.duration_sec AS clip_duration_sec
+       FROM ai_highlights ah
+       LEFT JOIN pinned_clips pc ON pc.id = ah.pinned_clip_id
+       WHERE ah.id = ?`,
+    )
+    .get(id) as unknown as
     | {
         id: number;
         status: AiHighlightStatus;
         score: number;
         pinned_clip_id: number | null;
+        clip_filename: string | null;
+        clip_duration_sec: number | null;
         transcript: string;
         signals_json: string;
         export_path: string;
@@ -727,6 +968,8 @@ export function getAiHighlight(id: number): AiHighlightItem | null {
     status: r.status,
     score: r.score,
     pinnedClipId: r.pinned_clip_id,
+    clipFilename: r.clip_filename ?? undefined,
+    clipDurationSec: r.clip_duration_sec ?? undefined,
     transcript: r.transcript,
     signals: safeParseJson(r.signals_json, {
       chat: 0,
@@ -743,11 +986,20 @@ export function getAiHighlight(id: number): AiHighlightItem | null {
 }
 
 export function listAiHighlights(): AiHighlightItem[] {
-  const rows = getDb().prepare('SELECT * FROM ai_highlights ORDER BY id DESC LIMIT 100').all() as unknown as Array<{
+  const rows = getDb()
+    .prepare(
+      `SELECT ah.*, pc.filename AS clip_filename, pc.duration_sec AS clip_duration_sec
+       FROM ai_highlights ah
+       LEFT JOIN pinned_clips pc ON pc.id = ah.pinned_clip_id
+       ORDER BY ah.id DESC LIMIT 100`,
+    )
+    .all() as unknown as Array<{
     id: number;
     status: AiHighlightStatus;
     score: number;
     pinned_clip_id: number | null;
+    clip_filename: string | null;
+    clip_duration_sec: number | null;
     transcript: string;
     signals_json: string;
     export_path: string;
@@ -759,6 +1011,8 @@ export function listAiHighlights(): AiHighlightItem[] {
     status: r.status,
     score: r.score,
     pinnedClipId: r.pinned_clip_id,
+    clipFilename: r.clip_filename ?? undefined,
+    clipDurationSec: r.clip_duration_sec ?? undefined,
     transcript: r.transcript,
     signals: safeParseJson(r.signals_json, {
       chat: 0,
@@ -788,6 +1042,27 @@ export function updateAiHighlightStatus(
        WHERE id = ?`,
     )
     .run(status, exportPath ?? existing.exportPath ?? '', id);
+  return getAiHighlight(id);
+}
+
+export function updateAiHighlightDetails(
+  id: number,
+  patch: { transcript?: string; score?: number; signals?: AiSignalBreakdown },
+): AiHighlightItem | null {
+  const existing = getAiHighlight(id);
+  if (!existing) return null;
+  getDb()
+    .prepare(
+      `UPDATE ai_highlights
+       SET transcript = ?, score = ?, signals_json = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .run(
+      patch.transcript ?? existing.transcript,
+      patch.score ?? existing.score,
+      JSON.stringify(patch.signals ?? existing.signals),
+      id,
+    );
   return getAiHighlight(id);
 }
 

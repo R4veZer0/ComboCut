@@ -8,14 +8,21 @@ server/dist/
 client/dist/
 release/
 
-# Bundled binaries & models (downloaded via npm run setup:bins)
+# Bundled binaries & models (downloaded via npm run setup:bins / download-vision-model)
 bin/
+models/
+build-resources/
+*.onnx
 
-# Runtime folders
+# Runtime folders & local databases
 buffer/
 pinned/
 exports/
 data/
+*.db
+*.db-wal
+*.db-shm
+.tmp*
 
 # Environment & OS files
 .env

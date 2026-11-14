@@ -34,8 +34,35 @@ export const BINS = {
 export const DB_PATH = path.join(DATA_DIR, 'studio.db');
 export const MEDIAMTX_CONFIG_PATH = path.join(DATA_DIR, 'mediamtx.yml');
 
-export function ensureRuntimeDirs(bufferDir = DEFAULT_BUFFER_DIR): void {
-  for (const dir of [bufferDir, PINNED_DIR, EXPORTS_DIR, DATA_DIR]) {
+let configuredDvrRoot: string | null = null;
+let configuredPinnedDir: string | null = null;
+
+export function setCustomDvrDir(dir?: string | null): void {
+  const trimmed = dir?.trim() ?? '';
+  configuredDvrRoot = trimmed.length > 0 ? path.resolve(trimmed) : null;
+}
+
+export function setCustomPinnedDir(dir?: string | null): void {
+  const trimmed = dir?.trim() ?? '';
+  configuredPinnedDir = trimmed.length > 0 ? path.resolve(trimmed) : null;
+}
+
+export function resolvePinnedDir(): string {
+  if (configuredPinnedDir) {
+    return configuredPinnedDir;
+  }
+  return PINNED_DIR;
+}
+
+export function resolveExportsDir(): string {
+  if (configuredDvrRoot) {
+    return path.join(configuredDvrRoot, 'exports');
+  }
+  return EXPORTS_DIR;
+}
+
+export function ensureRuntimeDirs(bufferDir = resolveBufferDir()): void {
+  for (const dir of [bufferDir, resolvePinnedDir(), resolveExportsDir(), DATA_DIR]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
@@ -44,5 +71,23 @@ export function resolveBufferDir(ramDiskPath?: string | null): string {
   if (ramDiskPath && ramDiskPath.trim().length > 0) {
     return path.resolve(ramDiskPath.trim());
   }
+  if (configuredDvrRoot) {
+    return path.join(configuredDvrRoot, 'buffer');
+  }
   return DEFAULT_BUFFER_DIR;
+}
+
+export function getDriveFreeBytes(targetDir: string): number | null {
+  try {
+    let probe = path.resolve(targetDir);
+    while (!fs.existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    const stats = fs.statfsSync(probe);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return null;
+  }
 }

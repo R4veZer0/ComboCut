@@ -1,6 +1,6 @@
 {
   "name": "@combocut/server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,8 @@
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "obs-websocket-js": "^5.0.8",
+    "onnxruntime-node": "^1.31.1",
+    "onnxruntime-web": "^1.31.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

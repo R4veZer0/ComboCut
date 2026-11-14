@@ -44,14 +44,37 @@ export class ObsWebSocketManager extends EventEmitter {
   private activePreset: ObsScenePreset | null = null;
   private lastError: string | undefined;
   private activeUrl = 'ws://127.0.0.1:4455';
+  private activePassword = '';
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private manualDisconnect = false;
+
+  private scheduleReconnect(): void {
+    if (this.manualDisconnect || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.connected && !this.connecting && !this.manualDisconnect) {
+        void this.connect(this.activeUrl, this.activePassword);
+      }
+    }, 5000);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
 
   async connect(urlOverride?: string, passwordOverride?: string): Promise<ObsWebSocketStatus> {
     const settings = getSettings();
     const url = (urlOverride ?? settings.obsWsUrl) || 'ws://127.0.0.1:4455';
     const password = passwordOverride ?? settings.obsWsPassword ?? '';
 
-    await this.disconnect();
+    this.manualDisconnect = false;
+    this.clearReconnectTimer();
+    await this.disconnectInternal(false);
     this.activeUrl = url;
+    this.activePassword = password;
     this.connecting = true;
     this.lastError = undefined;
     this.emit('status', this.getStatus());
@@ -67,10 +90,11 @@ export class ObsWebSocketManager extends EventEmitter {
         this.obs = null;
       }
       if (wasConnected) {
-        console.log('[OBS-WS] Disconnected');
+        console.log('[OBS-WS] Disconnected (auto-reconnecting in 5s)');
         this.emit('disconnected');
       }
       this.emit('status', this.getStatus());
+      this.scheduleReconnect();
     });
 
     client.on('ConnectionError', (err) => {
@@ -78,6 +102,7 @@ export class ObsWebSocketManager extends EventEmitter {
       this.connecting = false;
       this.connected = false;
       this.emit('status', this.getStatus());
+      this.scheduleReconnect();
     });
 
     client.on('CurrentProgramSceneChanged', (data) => {
@@ -110,6 +135,7 @@ export class ObsWebSocketManager extends EventEmitter {
       this.lastError = err instanceof Error ? err.message : String(err);
       this.obs = null;
       this.emit('status', this.getStatus());
+      this.scheduleReconnect();
     }
 
     return this.getStatus();
@@ -206,6 +232,12 @@ export class ObsWebSocketManager extends EventEmitter {
   }
 
   async disconnect(): Promise<void> {
+    this.manualDisconnect = true;
+    this.clearReconnectTimer();
+    await this.disconnectInternal(true);
+  }
+
+  private async disconnectInternal(emitStatus: boolean): Promise<void> {
     if (this.obs) {
       try {
         await this.obs.disconnect();
@@ -216,7 +248,9 @@ export class ObsWebSocketManager extends EventEmitter {
     }
     this.connected = false;
     this.connecting = false;
-    this.emit('status', this.getStatus());
+    if (emitStatus) {
+      this.emit('status', this.getStatus());
+    }
   }
 
   listPresets(): ObsScenePreset[] {

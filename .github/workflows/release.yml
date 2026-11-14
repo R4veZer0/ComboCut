@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           cd release
-          Get-FileHash ComboCut-Setup-*.exe,*.blockmap,latest.yml -Algorithm SHA256 | ForEach-Object {
+          Get-FileHash ComboCut-Setup*.exe,*.blockmap,latest.yml -Algorithm SHA256 | ForEach-Object {
             "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))"
           } | Out-File -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
@@ -49,7 +49,7 @@ jobs:
         with:
           name: combocut-windows-unsigned
           path: |
-            release/ComboCut-Setup-*.exe
+            release/ComboCut-Setup*.exe
             release/*.blockmap
             release/latest.yml
             release/SHA256SUMS.txt
@@ -60,7 +60,7 @@ jobs:
           draft: true
           prerelease: true
           files: |
-            release/ComboCut-Setup-*.exe
+            release/ComboCut-Setup*.exe
             release/*.blockmap
             release/latest.yml
             release/SHA256SUMS.txt

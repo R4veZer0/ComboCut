@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { execFile, spawn } from 'node:child_process';
-import { BINS, EXPORTS_DIR, PINNED_DIR, ensureRuntimeDirs, resolveBufferDir } from '../config/paths.js';
+import { BINS, ensureRuntimeDirs, resolveBufferDir, resolveExportsDir, resolvePinnedDir } from '../config/paths.js';
 import {
   createPinnedClip,
   createTimelineMarker,
@@ -10,6 +10,7 @@ import {
   getPinnedClip,
   getSettings,
   listPinnedClips,
+  type ClipStatus,
   type MarkerSource,
   type PinnedClip,
 } from '../db/database.js';
@@ -25,10 +26,12 @@ export class PinnedClipManager extends EventEmitter {
     triggerSource?: MarkerSource;
     triggerLabel?: string;
     durationSec?: number;
+    segmentNames?: string[];
+    status?: ClipStatus;
   }): Promise<PinnedClip> {
     const triggerSource = options?.triggerSource ?? 'hotkey';
     const triggerLabel = options?.triggerLabel ?? 'Manual Hotkey Pin';
-    const requestedSec = Math.min(90, Math.max(45, Math.round(options?.durationSec ?? 60)));
+    const requestedSec = Math.min(240, Math.max(15, Math.round(options?.durationSec ?? 60)));
 
     const settings = getSettings();
     const bufferDir = resolveBufferDir(settings.ramDiskEnabled ? settings.ramDiskPath : null);
@@ -49,15 +52,26 @@ export class PinnedClipManager extends EventEmitter {
       throw new Error('No HLS DVR segments available in /buffer to pin');
     }
 
-    // 2s per segment -> take trailing ceil(requestedSec / 2) segments
-    const neededSegs = Math.max(1, Math.ceil(requestedSec / 2));
-    const selected = segments.slice(-neededSegs);
+    let selected: string[];
+    if (options?.segmentNames && options.segmentNames.length > 0) {
+      const available = new Set(segments);
+      selected = options.segmentNames.filter((s) => available.has(s));
+      if (selected.length === 0) {
+        const neededSegs = Math.max(1, Math.ceil(requestedSec / 2));
+        selected = segments.slice(-neededSegs);
+      }
+    } else {
+      // 2s per segment -> take trailing ceil(requestedSec / 2) segments
+      const neededSegs = Math.max(1, Math.ceil(requestedSec / 2));
+      selected = segments.slice(-neededSegs);
+    }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const safeTag = triggerSource.replace(/[^a-z0-9_-]/gi, '');
     const filename = `pin_${stamp}_${safeTag}.mp4`;
-    const outputPath = path.join(PINNED_DIR, filename);
-    const listPath = path.join(PINNED_DIR, `.concat_${Date.now()}.txt`);
+    const pinnedDir = resolvePinnedDir();
+    const outputPath = path.join(pinnedDir, filename);
+    const listPath = path.join(pinnedDir, `.concat_${Date.now()}.txt`);
 
     const listBody = selected
       .map((seg) => `file '${path.join(bufferDir, seg).replace(/'/g, "'\\''")}'`)
@@ -90,6 +104,7 @@ export class PinnedClipManager extends EventEmitter {
       triggerLabel,
       durationSec: actualDuration,
       cropPreset: activePreset,
+      status: options?.status ?? 'approved',
     });
 
     console.log(`[Pinned] Extracted ${actualDuration.toFixed(1)}s micro-clip -> ${outputPath}`);
@@ -105,7 +120,7 @@ export class PinnedClipManager extends EventEmitter {
     }
     ensureRuntimeDirs();
     const outName = `export_${Date.now()}_${clip.filename}`;
-    const outPath = path.join(EXPORTS_DIR, outName);
+    const outPath = path.join(resolveExportsDir(), outName);
 
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(
@@ -191,8 +206,17 @@ export class PinnedClipManager extends EventEmitter {
 
   removeClip(id: number): boolean {
     const clip = getPinnedClip(id);
-    if (clip && fs.existsSync(clip.filePath)) {
-      fs.rmSync(clip.filePath, { force: true });
+    if (clip) {
+      if (fs.existsSync(clip.filePath)) {
+        fs.rmSync(clip.filePath, { force: true });
+      }
+      if (clip.srtPath && fs.existsSync(clip.srtPath)) {
+        fs.rmSync(clip.srtPath, { force: true });
+      }
+      const sidecarSrt = clip.filePath.replace(/\.mp4$/i, '.srt');
+      if (fs.existsSync(sidecarSrt)) {
+        fs.rmSync(sidecarSrt, { force: true });
+      }
     }
     const ok = deletePinnedClip(id);
     if (ok) this.emit('clipsUpdated', listPinnedClips());
