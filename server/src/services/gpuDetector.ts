@@ -1,0 +1,100 @@
+import fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { BINS } from '../config/paths.js';
+
+const execFileAsync = promisify(execFile);
+
+export type VideoEncoder = 'h264_nvenc' | 'h264_amf' | 'h264_qsv' | 'libx264';
+
+export interface GpuDetectionResult {
+  selected: VideoEncoder;
+  probed: Array<{
+    encoder: VideoEncoder;
+    available: boolean;
+    reason?: string;
+  }>;
+  detectedAt: string;
+}
+
+const CANDIDATE_ENCODERS: VideoEncoder[] = [
+  'h264_nvenc',
+  'h264_amf',
+  'h264_qsv',
+  'libx264',
+];
+
+async function probeEncoder(encoder: VideoEncoder): Promise<{ available: boolean; reason?: string }> {
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-f', 'lavfi',
+    '-i', 'color=c=black:s=1280x720:r=60',
+    '-frames:v', '1',
+    '-pix_fmt', 'yuv420p',
+    '-c:v', encoder,
+    '-f', 'null',
+    '-',
+  ];
+
+  try {
+    await execFileAsync(BINS.ffmpeg, args, { timeout: 8000 });
+    return { available: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const firstLine = message.split(/\r?\n/).find((l) => l.trim().length > 0) ?? 'Probe failed';
+    return { available: false, reason: firstLine.trim() };
+  }
+}
+
+let cachedResult: GpuDetectionResult | null = null;
+
+export async function detectGpuEncoder(force = false): Promise<GpuDetectionResult> {
+  if (cachedResult && !force) {
+    return cachedResult;
+  }
+
+  if (!fs.existsSync(BINS.ffmpeg)) {
+    const fallback: GpuDetectionResult = {
+      selected: 'libx264',
+      probed: CANDIDATE_ENCODERS.map((encoder) => ({
+        encoder,
+        available: encoder === 'libx264',
+        reason: encoder === 'libx264' ? 'ffmpeg.exe missing; defaulting to libx264' : 'ffmpeg.exe missing',
+      })),
+      detectedAt: new Date().toISOString(),
+    };
+    cachedResult = fallback;
+    return fallback;
+  }
+
+  const probed: GpuDetectionResult['probed'] = [];
+  let selected: VideoEncoder = 'libx264';
+  let found = false;
+
+  for (const encoder of CANDIDATE_ENCODERS) {
+    if (found) {
+      probed.push({ encoder, available: false, reason: 'Skipped (higher-priority encoder selected)' });
+      continue;
+    }
+    const res = await probeEncoder(encoder);
+    probed.push({ encoder, available: res.available, reason: res.reason });
+    if (res.available) {
+      selected = encoder;
+      found = true;
+    }
+  }
+
+  cachedResult = {
+    selected,
+    probed,
+    detectedAt: new Date().toISOString(),
+  };
+
+  console.log(`[GPU] Auto-detected encoder: ${selected}`);
+  return cachedResult;
+}
+
+export function getCachedGpuEncoder(): GpuDetectionResult | null {
+  return cachedResult;
+}

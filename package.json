@@ -1,0 +1,96 @@
+{
+  "name": "combocut",
+  "version": "0.1.0",
+  "description": "100% local, zero-cost Windows live broadcast router, rolling DVR clipper, AI highlight assistant, and short-form mini-editor.",
+  "license": "MIT",
+  "private": true,
+  "main": "electron/main.cjs",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev --workspace=server\" \"npm run dev --workspace=client\"",
+    "build": "npm run build --workspace=server && npm run build --workspace=client",
+    "setup:bins": "node scripts/setup-bins.mjs",
+    "build:wasapi": "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe /nologo /optimize+ /platform:x64 /target:exe /out:bin\\wasapi-capture.exe native\\wasapi-capture\\Program.cs",
+    "test:stream": "node scripts/test-stream.mjs",
+    "desktop:dev": "npm run build && electron .",
+    "desktop:pack": "npm run build && electron-builder --win --x64 --dir",
+    "desktop:dist": "npm run build && electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "io.combocut.desktop",
+    "productName": "ComboCut",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "server/dist/**/*",
+      "server/package.json",
+      "client/dist/**/*",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "server/dist/**/*",
+      "client/dist/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": [
+          "**/*",
+          "!.tmp/**"
+        ]
+      },
+      {
+        "from": "scripts",
+        "to": "scripts"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "R4veZer0",
+        "repo": "ComboCut"
+      }
+    ]
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.25.12": true
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "electron-updater": "^6.8.11",
+    "express": "^4.21.2",
+    "obs-websocket-js": "^5.0.8",
+    "ws": "^8.18.0"
+  }
+}

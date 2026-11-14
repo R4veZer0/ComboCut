@@ -1,0 +1,84 @@
+name: Release Windows x64 Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: cmd /c npm ci
+
+      - name: Compile 3-track WASAPI audio helper
+        run: cmd /c npm run build:wasapi
+
+      - name: Download MediaMTX and FFmpeg binaries
+        run: cmd /c "npm run setup:bins || exit /b 0"
+
+      - name: Build Windows x64 NSIS installer
+        run: cmd /c npm run desktop:dist
+
+      - name: Generate SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          cd release
+          Get-FileHash ComboCut-Setup-*.exe,*.blockmap,latest.yml -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))"
+          } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Upload unsigned installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: combocut-windows-unsigned
+          path: |
+            release/ComboCut-Setup-*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/SHA256SUMS.txt
+
+      - name: Create GitHub Release Draft
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          files: |
+            release/ComboCut-Setup-*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/SHA256SUMS.txt
+
+  # Ready-to-enable SignPath Foundation code-signing job.
+  # Once approved by SignPath Foundation, uncomment and configure secrets:
+  # SIGNPATH_API_TOKEN, SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+  #
+  # sign-windows:
+  #   needs: build-windows
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Sign installer via SignPath Foundation
+  #       uses: signpath/github-action@v1
+  #       with:
+  #         api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+  #         organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+  #         project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+  #         signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+  #         github-artifact-id: ${{ needs.build-windows.outputs.artifact-id }}
+  #         wait-for-completion: true

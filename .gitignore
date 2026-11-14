@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Build outputs
+dist/
+server/dist/
+client/dist/
+release/
+
+# Bundled binaries & models (downloaded via npm run setup:bins)
+bin/
+
+# Runtime folders
+buffer/
+pinned/
+exports/
+data/
+
+# Environment & OS files
+.env
+.env.local
+*.crt
+*.key
+.DS_Store
+Thumbs.db
